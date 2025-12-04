@@ -1,121 +1,165 @@
-# app.py
 import streamlit as st
 import pandas as pd
 import numpy as np
-from pathlib import Path
-import joblib
 import matplotlib.pyplot as plt
+import joblib
+from pathlib import Path
 
-from utils import load_models, compute_iaq_score_row, label_from_score
-
-st.set_page_config(layout="wide", page_title="IAQ Analyzer")
-st.title("Indoor Air Quality (IAQ) Monitoring & Prediction")
-
+# -------------------------------
+# Load Pre-Trained Models
+# -------------------------------
 models_dir = Path("models")
-if not models_dir.exists():
-    st.warning("Models not found. Run `python train.py --input data/feed.csv --out models` first or upload models into /models.")
-    
-# Load models if available
-try:
-    clf, rgr, scaler, meta = load_models("models")
-except Exception as e:
-    clf = rgr = scaler = None
-    meta = None
 
-st.markdown("**Instructions:** Upload a CSV with columns: `temperature`, `humidity`, `air_quality`, `dust_density` OR use the manual entry to predict a single observation.")
+clf = joblib.load(models_dir / "iaq_clf.joblib")
+rgr = joblib.load(models_dir / "iaq_rgr.joblib")
+scaler = joblib.load(models_dir / "iaq_scaler.joblib")
+meta = joblib.load(models_dir / "metadata.json") if (models_dir / "metadata.json").exists() else None
 
-# Sidebar - manual input
-st.sidebar.header("Manual input for a single reading")
-temp = st.sidebar.number_input("Temperature (°C)", value=30.0, format="%.1f")
-hum = st.sidebar.number_input("Humidity (%)", value=69.0, format="%.1f")
-dust = st.sidebar.number_input("Dust density (PM)", value=250.0, format="%.2f")
-aq = st.sidebar.number_input("Air quality (raw sensor value, optional)", value=600.0, format="%.1f")
+st.set_page_config(layout="wide", page_title="Indoor Air Quality Monitoring System")
 
-if st.sidebar.button("Predict (manual)"):
-    if clf is None:
-        st.error("Models not loaded. Train and save models first.")
-    else:
-        X = pd.DataFrame([[temp, hum, dust]], columns=['temperature','humidity','dust_density'])
-        pred_label = clf.predict(X)[0]
-        try:
-            score = compute_iaq_score_row({'air_quality':aq,'dust_density':dust,'temperature':temp,'humidity':hum}, scaler)
-        except Exception:
-            score = None
-        st.sidebar.markdown(f"### IAQ: **{pred_label}**")
-        if score is not None:
-            st.sidebar.markdown(f"**IAQ Score:** {score}/100")
-        st.sidebar.write("**Recommendations:**")
-        if pred_label == 'Poor':
-            st.sidebar.write("- Increase ventilation\n- Use air purifier\n- Reduce dust sources")
-        elif pred_label == 'Moderate':
-            st.sidebar.write("- Monitor and improve ventilation")
-        else:
-            st.sidebar.write("- Conditions look fine")
+st.title("🌿 Indoor Air Quality Monitoring System using Machine Learning")
+st.write("""
+Upload indoor air-quality sensor data to automatically classify
+air quality into **Good**, **Moderate**, or **Poor**, compute IAQ scores,
+predict AQ values, and visualize trends.
+""")
 
-# File upload for bulk analysis
-st.header("Upload dataset for batch analysis")
-uploaded = st.file_uploader("Upload CSV", type=['csv'])
-if uploaded is not None:
+# -------------------------------
+# Helper Functions
+# -------------------------------
+
+def compute_iaq_score(df):
+    arr = df[['air_quality','dust_density','temperature','humidity']].astype(float).values
+    scaled = scaler.transform(arr)
+    df['iaq_score'] = (
+        0.55 * scaled[:,0] +
+        0.35 * scaled[:,1] +
+        0.05 * scaled[:,2] +
+        0.05 * scaled[:,3]
+    ) * 100
+
+    df['iaq_score'] = df['iaq_score'].clip(0,100).round(1)
+    return df
+
+def label_iaq(df):
+    q1 = meta["quantiles"]["q1"]
+    q2 = meta["quantiles"]["q2"]
+
+    def f(x):
+        if x <= q1: return "Good"
+        elif x <= q2: return "Moderate"
+        return "Poor"
+
+    df['iaq_label'] = df['iaq_score'].apply(f)
+    return df
+
+# -------------------------------
+# File Upload
+# -------------------------------
+
+uploaded = st.file_uploader("📤 Upload IAQ CSV file", type=['csv'])
+
+if uploaded:
     df = pd.read_csv(uploaded)
+
+    # Fix column names
     df = df.rename(columns=lambda c: c.strip().lower())
-    # normalize names
-    if 'air quality' in df.columns:
-        df = df.rename(columns={'air quality':'air_quality'})
-    if 'dust density' in df.columns:
-        df = df.rename(columns={'dust density':'dust_density'})
-    st.subheader("Raw data (first rows)")
+    if "air quality" in df.columns:
+        df = df.rename(columns={"air quality": "air_quality"})
+    if "dust density" in df.columns:
+        df = df.rename(columns={"dust density": "dust_density"})
+
+    required_cols = ["temperature","humidity","air_quality","dust_density"]
+
+    if not all(col in df.columns for col in required_cols):
+        st.error(f"CSV must contain: {required_cols}")
+        st.stop()
+
+    st.subheader("📋 Raw Data Preview")
     st.dataframe(df.head())
 
-    # basic validation
-    needed = ['temperature','humidity','air_quality','dust_density']
-    if not all(c in df.columns for c in needed):
-        st.error(f"Uploaded CSV must contain columns: {needed}")
+    df = df.dropna(subset=required_cols)
+    df[required_cols] = df[required_cols].astype(float)
+
+    # Compute IAQ Score + Label + Predictions
+    df = compute_iaq_score(df)
+    df = label_iaq(df)
+
+    # Classifier Prediction
+    X = df[['temperature','humidity','dust_density']]
+    df['predicted_label'] = clf.predict(X)
+
+    # Regressor Prediction
+    df['predicted_air_quality'] = rgr.predict(X).round(2)
+
+    # -------------------------------
+    # Show Results
+    # -------------------------------
+
+    st.subheader("🏷 Predicted IAQ Labels (first 20 rows)")
+    st.dataframe(df[['temperature','humidity','dust_density','iaq_score','predicted_label']].head(20))
+
+    # -------------------------------
+    # Graphs
+    # -------------------------------
+
+    st.subheader("📉 IAQ Score Distribution")
+    fig, ax = plt.subplots()
+    ax.hist(df["iaq_score"], bins=20, color="green")
+    ax.set_xlabel("IAQ Score")
+    ax.set_ylabel("Count")
+    st.pyplot(fig)
+
+    st.subheader("🌫 Dust Density Distribution")
+    fig, ax = plt.subplots()
+    ax.hist(df["dust_density"], bins=20, color="orange")
+    ax.set_xlabel("Dust Density")
+    st.pyplot(fig)
+
+    # -------------------------------
+    # Download Output
+    # -------------------------------
+
+    st.download_button(
+        "⬇ Download Predictions",
+        df.to_csv(index=False),
+        "iaq_predictions.csv"
+    )
+
+# -------------------------------
+# Manual Input Section
+# -------------------------------
+
+st.header("🧪 Manual IAQ Prediction")
+
+col1, col2, col3, col4 = st.columns(4)
+temp = col1.number_input("Temperature (°C)", 20.0)
+hum = col2.number_input("Humidity (%)", 60.0)
+dust = col3.number_input("Dust Density (PM)", 250.0)
+aq = col4.number_input("Air Quality Value (sensor)", 450.0)
+
+if st.button("Predict Now"):
+    single = pd.DataFrame([{
+        "temperature": temp,
+        "humidity": hum,
+        "dust_density": dust,
+        "air_quality": aq
+    }])
+
+    single = compute_iaq_score(single)
+    single = label_iaq(single)
+
+    pred_label = clf.predict(single[['temperature','humidity','dust_density']])[0]
+    pred_aq = rgr.predict(single[['temperature','humidity','dust_density']])[0]
+
+    st.subheader(f"IAQ Label: **{pred_label}**")
+    st.subheader(f"IAQ Score: **{single['iaq_score'].iloc[0]} / 100**")
+    st.subheader(f"Predicted AQ Value: **{pred_aq:.2f}**")
+
+    if pred_label == "Poor":
+        st.error("⚠ Poor air quality. Improve ventilation, use purifier.")
+    elif pred_label == "Moderate":
+        st.warning("⚠ Moderate air quality. Monitor conditions.")
     else:
-        df = df.dropna(subset=needed)
-        # Compute IAQ score if scaler available
-        if scaler is not None:
-            # compute scores vectorized
-            arr = df[['air_quality','dust_density','temperature','humidity']].astype(float).values
-            scaled = scaler.transform(arr)
-            df['iaq_score'] = (0.55*scaled[:,0] + 0.35*scaled[:,1] + 0.05*scaled[:,2] + 0.05*scaled[:,3]) * 100
-            df['iaq_score'] = df['iaq_score'].clip(0,100).round(1)
-            q1 = meta['quantiles']['q1']; q2 = meta['quantiles']['q2']
-            df['iaq_label'] = df['iaq_score'].apply(lambda s: 'Good' if s<=q1 else ('Moderate' if s<=q2 else 'Poor'))
-        # Show summary
-        st.subheader("Summary statistics")
-        st.write(df[['temperature','humidity','air_quality','dust_density']].describe())
-        # Plot single pollutant time distribution if timestamp exists
-        if 'created_at' in df.columns or 'timestamp' in df.columns:
-            time_col = 'created_at' if 'created_at' in df.columns else 'timestamp'
-            try:
-                df[time_col] = pd.to_datetime(df[time_col])
-                st.subheader("Time-series plots")
-                col1, col2 = st.columns(2)
-                with col1:
-                    fig, ax = plt.subplots()
-                    ax.plot(df[time_col], df['iaq_score'], marker='.', linestyle='-', linewidth=0.6)
-                    ax.set_title("IAQ Score over time")
-                    ax.set_xlabel("Time")
-                    st.pyplot(fig)
-                with col2:
-                    fig, ax = plt.subplots()
-                    ax.plot(df[time_col], df['dust_density'], marker='.', linestyle='-', linewidth=0.6)
-                    ax.set_title("Dust density over time")
-                    ax.set_xlabel("Time")
-                    st.pyplot(fig)
-            except Exception:
-                st.info("Could not parse timestamp column for time-series plotting.")
-        else:
-            st.info("No timestamp column found — upload time column (created_at/timestamp) for trends.")
+        st.success("✓ Good air quality.")
 
-        # Predict labels using classifier
-        if clf is not None:
-            Xu = df[['temperature','humidity','dust_density']].astype(float)
-            df['pred_label'] = clf.predict(Xu)
-            st.subheader("Predicted IAQ labels (first 20 rows)")
-            st.dataframe(df[['temperature','humidity','dust_density','iaq_score','pred_label']].head(20))
-            csv = df.to_csv(index=False).encode('utf-8')
-            st.download_button("Download predictions CSV", data=csv, file_name="iaq_predictions.csv")
-
-st.markdown("---")
-st.write("Built with ❤️ — Nova")
