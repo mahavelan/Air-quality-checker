@@ -1,0 +1,12 @@
+{
+  "quantiles": {
+    "q1": 38.467,
+    "q2": 59.272
+  },
+  "features": [
+    "temperature",
+    "humidity",
+    "dust_density"
+  ],
+  "notes": "iaq_score = weighted combination of scaled features (see train.py)"
+}
