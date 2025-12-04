@@ -8,12 +8,20 @@ from pathlib import Path
 # -------------------------------
 # Load Pre-Trained Models
 # -------------------------------
+from pathlib import Path
+import joblib
+import json
+
 models_dir = Path("models")
 
 clf = joblib.load(models_dir / "iaq_clf.joblib")
 rgr = joblib.load(models_dir / "iaq_rgr.joblib")
 scaler = joblib.load(models_dir / "iaq_scaler.joblib")
-meta = joblib.load(models_dir / "metadata.json") if (models_dir / "metadata.json").exists() else None
+
+# Load metadata.json correctly (use json.load, not joblib)
+meta_path = models_dir / "metadata.json"
+meta = json.load(open(meta_path)) if meta_path.exists() else None
+
 
 st.set_page_config(layout="wide", page_title="Indoor Air Quality Monitoring System")
 
